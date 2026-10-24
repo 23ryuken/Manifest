@@ -11,6 +11,10 @@ function httpError(status, message) {
 // Helper function to check if a value is a non-empty string
 const isFilled = (value) => typeof value === 'string' && value.trim() !== '';
 
+// Hashed once at startup. Used when the email doesn't exist, so an unknown
+// email takes about as long as a wrong password.
+const DUMMY_HASH = await bcrypt.hash('not-a-real-password', 12);
+
 export async function registerUser({ fullname, email, password }) {
   if (!isFilled(fullname) || !isFilled(email) || !isFilled(password)) {
     throw httpError(400, 'All fields are required');
@@ -24,7 +28,7 @@ export async function registerUser({ fullname, email, password }) {
 
   if (!emailRegex.test(email.trim())) {
     throw httpError(400, 'Invalid email format');
-    }
+  }
 
   const passwordHash = await bcrypt.hash(password, 12);
 
@@ -46,4 +50,28 @@ export async function registerUser({ fullname, email, password }) {
     }
     throw error;
   }
+}
+
+export async function loginUser({ email, password }) {
+  if (!isFilled(email) || !isFilled(password)) {
+    throw httpError(400, 'Email and password are required');
+  }
+
+  const user = await User.findOne({ email: email.trim().toLowerCase() }).select(
+    '+passwordHash'
+  );
+
+  // Always run one bcrypt comparison, whether or not the user exists.
+  const hashToCheck = user ? user.passwordHash : DUMMY_HASH;
+  const isPasswordValid = await bcrypt.compare(password, hashToCheck);
+
+  if (!user || !isPasswordValid) {
+    throw httpError(401, 'Invalid email or password');
+  }
+
+  return {
+    id: user._id,
+    fullname: user.fullname,
+    email: user.email,
+  };
 }
