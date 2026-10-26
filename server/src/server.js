@@ -8,6 +8,7 @@ const PORT = process.env.PORT || 4002;
 
 app.use(express.json());
 app.use('/api/auth', authRoutes);
+app.use('/api/items', itemRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
