@@ -1,6 +1,7 @@
 import express from 'express';
 import { connectDB } from './config/db.js';
 import authRoutes from './routes/authRoutes.js';
+import itemRoutes from './routes/itemRoutes.js';
 
 const app = express();
 

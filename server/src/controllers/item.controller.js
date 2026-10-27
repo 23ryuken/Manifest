@@ -61,3 +61,40 @@ export async function createFolder(req, res) {
         res.status(500).json({ message: 'Internal server error' });
     }
 }
+
+export async function listItems(req, res) {
+    try {
+        const owner = req.user.id;
+        const { parent } = req.query;
+
+        let parentId = null;
+
+        if (parent) {
+            // typeof check rejects ?parent=a&parent=b (array) and ?parent[x]=y (object)
+            if (typeof parent !== 'string' || !mongoose.isValidObjectId(parent)) {
+                return res.status(400).json({ message: 'Invalid parent folder ID' });
+            }
+
+            const parentFolder = await Item.findOne({
+                _id: parent,
+                owner,
+                type: 'folder',
+            });
+
+            if (!parentFolder) {
+                return res.status(404).json({ message: 'Parent folder not found' });
+            }
+
+            parentId = parentFolder._id;
+        }
+
+        const items = await Item.find({ owner, parent: parentId })
+            .sort({ type: -1, name: 1 })
+            .collation({ locale: 'en', strength: 2 });
+
+        res.status(200).json({ items });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}

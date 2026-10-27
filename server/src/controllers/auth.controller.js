@@ -20,10 +20,10 @@ export async function register(req, res) {
                 .json({ message: 'Name, email, and password are required' });
         }
 
-        if (password.length < 6) {
+        if (password.length < 8) {
             return res
                 .status(400)
-                .json({ message: 'Password must be at least 6 characters long' });
+                .json({ message: 'Password must be at least 8 characters long' });
         }
 
         // Normalize explicitly so the lookup matches what the schema stores
