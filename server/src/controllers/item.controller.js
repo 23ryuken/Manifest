@@ -2,11 +2,21 @@ import mongoose from 'mongoose';
 import Item from '../models/Item.js';
 
 
+// Returns the folder document, or null if the id is malformed,
+// the folder doesn't exist, belongs to someone else, or is a file.
+async function findOwnedFolder(ownerId, folderId) {
+    if (typeof folderId !== 'string' || !mongoose.isValidObjectId(folderId)) {
+        return null;
+    }
+    return Item.findOne({ _id: folderId, owner: ownerId, type: 'folder' });
+}
+
+// Walks upward from startId through parent links.
+// Returns true if it meets targetId (or startId === targetId).
 async function isAncestorOrSelf(ownerId, startId, targetId) {
     let currentId = startId;
 
     while (currentId) {
-        // ObjectIds are objects, so compare them as strings
         if (String(currentId) === String(targetId)) {
             return true;
         }
@@ -16,20 +26,35 @@ async function isAncestorOrSelf(ownerId, startId, targetId) {
             return false;
         }
 
-        currentId = node.parent; // step up one level; null ends the loop
+        currentId = node.parent;
     }
 
     return false;
 }
 
+// Deletes children first, the folder last, so a failure halfway
+// never leaves unreachable orphans.
+async function deleteFolderAndDescendants(ownerId, folderId) {
+    const children = await Item.find({ owner: ownerId, parent: folderId });
 
+    for (const child of children) {
+        if (child.type === 'folder') {
+            await deleteFolderAndDescendants(ownerId, child._id);
+        } else {
+            await child.deleteOne(); // Phase 3: also delete the stored file here
+        }
+    }
+
+    await Item.deleteOne({ _id: folderId, owner: ownerId });
+}
+
+// controllers
 
 export async function createFolder(req, res) {
     try {
-        const { name, parent } = req.body;
+        const { name, parent } = req.body ?? {};
         const owner = req.user.id;
 
-        // Validate the name
         if (typeof name !== 'string' || name.trim() === '') {
             return res.status(400).json({ message: 'Invalid folder name' });
         }
@@ -37,30 +62,16 @@ export async function createFolder(req, res) {
         const trimmedName = name.trim();
 
         if (trimmedName.includes('/')) {
-            return res
-                .status(400)
-                .json({ message: 'Folder name cannot contain "/"' });
+            return res.status(400).json({ message: 'Folder name cannot contain "/"' });
         }
 
-        // Validate the parent, if one was given
         let parentId = null;
 
         if (parent) {
-            if (!mongoose.isValidObjectId(parent)) {
-                return res.status(400).json({ message: 'Invalid parent folder ID' });
-            }
-
-            // One query checks: exists + belongs to this user + is a folder
-            const parentFolder = await Item.findOne({
-                _id: parent,
-                owner,
-                type: 'folder',
-            });
-
+            const parentFolder = await findOwnedFolder(owner, parent);
             if (!parentFolder) {
                 return res.status(404).json({ message: 'Parent folder not found' });
             }
-
             parentId = parentFolder._id;
         }
 
@@ -73,7 +84,6 @@ export async function createFolder(req, res) {
 
         res.status(201).json(newFolder);
     } catch (error) {
-        // The unique index is the real guarantee against duplicates
         if (error.code === 11000) {
             return res
                 .status(409)
@@ -93,21 +103,10 @@ export async function listItems(req, res) {
         let parentId = null;
 
         if (parent) {
-            // typeof check rejects ?parent=a&parent=b (array) and ?parent[x]=y (object)
-            if (typeof parent !== 'string' || !mongoose.isValidObjectId(parent)) {
-                return res.status(400).json({ message: 'Invalid parent folder ID' });
-            }
-
-            const parentFolder = await Item.findOne({
-                _id: parent,
-                owner,
-                type: 'folder',
-            });
-
+            const parentFolder = await findOwnedFolder(owner, parent);
             if (!parentFolder) {
                 return res.status(404).json({ message: 'Parent folder not found' });
             }
-
             parentId = parentFolder._id;
         }
 
@@ -121,7 +120,6 @@ export async function listItems(req, res) {
         res.status(500).json({ message: 'Internal server error' });
     }
 }
-
 
 export async function updateItem(req, res) {
     try {
@@ -151,9 +149,7 @@ export async function updateItem(req, res) {
             const trimmedName = name.trim();
 
             if (trimmedName.includes('/')) {
-                return res
-                    .status(400)
-                    .json({ message: 'Item name cannot contain "/"' });
+                return res.status(400).json({ message: 'Item name cannot contain "/"' });
             }
 
             item.name = trimmedName;
@@ -164,21 +160,11 @@ export async function updateItem(req, res) {
             if (parent === null) {
                 item.parent = null;
             } else {
-                if (typeof parent !== 'string' || !mongoose.isValidObjectId(parent)) {
-                    return res.status(400).json({ message: 'Invalid parent folder ID' });
-                }
-
-                const target = await Item.findOne({
-                    _id: parent,
-                    owner,
-                    type: 'folder',
-                });
-
+                const target = await findOwnedFolder(owner, parent);
                 if (!target) {
                     return res.status(404).json({ message: 'Parent folder not found' });
                 }
 
-                // Only folders can contain things, so only folders can cause a loop
                 if (
                     item.type === 'folder' &&
                     (await isAncestorOrSelf(owner, target._id, item._id))
@@ -202,6 +188,33 @@ export async function updateItem(req, res) {
                 .json({ message: 'An item with this name already exists here' });
         }
 
+        console.error(error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}
+
+export async function deleteItem(req, res) {
+    try {
+        const { id } = req.params;
+        const owner = req.user.id;
+
+        if (!mongoose.isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid item ID' });
+        }
+
+        const item = await Item.findOne({ _id: id, owner });
+        if (!item) {
+            return res.status(404).json({ message: 'Item not found' });
+        }
+
+        if (item.type === 'folder') {
+            await deleteFolderAndDescendants(owner, item._id);
+        } else {
+            await item.deleteOne(); // also delete the stored file here
+        }
+
+        res.status(204).send();
+    } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Internal server error' });
     }
