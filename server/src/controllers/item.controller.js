@@ -1,5 +1,9 @@
 import mongoose from 'mongoose';
 import Item from '../models/Item.js';
+import path from 'node:path';
+import { removeStored } from '../services/storage.service.js';
+import { UPLOAD_DIR } from '../services/storage.service.js';
+
 
 
 // Returns the folder document, or null if the id is malformed,
@@ -41,7 +45,8 @@ async function deleteFolderAndDescendants(ownerId, folderId) {
         if (child.type === 'folder') {
             await deleteFolderAndDescendants(ownerId, child._id);
         } else {
-            await child.deleteOne(); // Phase 3: also delete the stored file here
+            await child.deleteOne();
+            await removeStored(child.storageKey);
         }
     }
 
@@ -210,10 +215,89 @@ export async function deleteItem(req, res) {
         if (item.type === 'folder') {
             await deleteFolderAndDescendants(owner, item._id);
         } else {
-            await item.deleteOne(); // also delete the stored file here
+            await item.deleteOne();
+            await removeStored(item.storageKey);
         }
 
         res.status(204).send();
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+}
+
+export async function uploadFile(req, res) {
+    const file = req.file; // multer already saved the bytes by now
+        try {
+            if (!file) {
+                return res.status(400).json({ message: 'No file uploaded' });
+            }
+
+            const owner = req.user.id;
+            const { parent } = req.body ?? {};
+            // multer decodes filenames as latin1, which garbles accents (é -> Ã©).
+            // Re-decode the raw bytes as UTF-8. (I tested this fix.)
+
+            const name = Buffer.from(file.originalname, 'latin1').toString('utf8').trim();
+
+            let parentId = null;
+            let problem = null; // [status, message] if we must reject
+
+            if (!name || name.includes('/')) {
+                problem = [400, 'Invalid file name'];
+                } else if (parent) {
+
+                const folder = await findOwnedFolder(owner, parent);
+                    if (folder) parentId = folder._id;
+                        else problem = [404, 'Parent folder not found'];
+                }
+
+            if (problem) {
+                await removeStored(file.filename); // rejected: delete the useless bytes
+                return res.status(problem[0]).json({ message: problem[1] });
+            }
+
+                const item = await Item.create({
+                owner,
+                name,
+                type: 'file',
+                parent: parentId,
+                size: file.size, // bytes
+                mimeType: file.mimetype,
+                storageKey: file.filename, // the random name on disk
+                });
+
+                res.status(201).json(item);
+                } catch (error) {
+                // ANY failure after multer saved the file: delete the bytes first.
+                if (file) await removeStored(file.filename).catch(() => {});
+                if (error.code === 11000) { // your unique index: same name in the same folder
+                    return res.status(409).json({ message: 'Name already exists here' });
+                }
+                console.error(error);
+                res.status(500).json({ message: 'Internal server error' });
+                }
+}
+
+export async function downloadFile(req, res) {
+    try {
+        const { id } = req.params;
+        if (!mongoose.isValidObjectId(id)) {
+            return res.status(400).json({ message: 'Invalid item ID' });
+        }
+
+        const item = await Item.findOne({ _id: id, owner: req.user.id, type: 'file' });
+        if (!item) {
+            return res.status(404).json({ message: 'File not found' });
+        }
+
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.type(path.extname(item.name));
+        res.download(item.storageKey, item.name, { root: UPLOAD_DIR }, (err) => {
+            if (err && !res.headersSent) {
+                res.status(404).json({ message: 'File data is missing' });
+            }
+        });
     } catch (error) {
         console.error(error);
         res.status(500).json({ message: 'Internal server error' });
